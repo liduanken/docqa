@@ -1,0 +1,12 @@
+# Accepted risks, each scoped to one file with a justification. Revisit with operator v2
+# (server-side apply, owner references and per-namespace RoleBindings).
+misconfigurations:
+  - id: KSV-0041
+    paths: ["docqa-operator/deploy/operator.yaml"]
+    statement: >-
+      Helm stores release state in Secrets in the target namespace, and the chart renders an
+      ExternalSecret-owned Secret, so the Helm-operator pattern needs Secret access.
+  - id: KSV-0056
+    paths: ["docqa-operator/deploy/operator.yaml"]
+    statement: >-
+      The operator installs the chart, which owns a Service, NetworkPolicy and Ingress per instance.

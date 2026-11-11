@@ -1,0 +1,178 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/docqa
+  OPERATOR_IMAGE: ghcr.io/${{ github.repository }}/docqa-operator
+  HELM_VERSION: v3.16.2
+  KUBECONFORM_VERSION: v0.6.7
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          activate-environment: true
+          enable-cache: true
+      # --seed so pip-audit has pip available inside the venv.
+      - run: uv venv --seed --clear && uv pip install -e . --group dev -e "./docqa-operator[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy app
+      - run: pytest tests --cov=app --cov-fail-under=80
+      - run: cd docqa-operator && pytest
+      # --skip-editable: our own packages aren't on PyPI; known vulnerabilities still fail the job.
+      - run: pip-audit --skip-editable
+
+  kubernetes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Install kubeconform, promtool and yq
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin kubeconform
+          docker create --name prom prom/prometheus:v2.55.1 >/dev/null
+          sudo docker cp prom:/bin/promtool /usr/local/bin/promtool && docker rm prom >/dev/null
+          sudo snap install yq
+      - name: Lint chart
+        run: |
+          for env in dev prod; do helm lint charts/docqa --strict -f "charts/docqa/values-$env.yaml"; done
+      - name: Render and validate manifests
+        run: |
+          mkdir -p rendered
+          for env in dev prod; do
+            helm template docqa charts/docqa -n docqa -f "charts/docqa/values-$env.yaml" > "rendered/$env.yaml"
+          done
+          # The upstream schema set has no CustomResourceDefinition schema; the CRD is instead
+          # validated by a real API server in the kind step below (which also compiles the CEL rules).
+          kubeconform -strict -summary -kubernetes-version 1.30.0 -skip CustomResourceDefinition \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/*.yaml docqa-operator/deploy/crd.yaml docqa-operator/deploy/operator.yaml
+      - name: Check alert rules
+        run: |
+          for env in dev prod; do
+            yq 'select(.kind == "PrometheusRule") | .spec' "rendered/$env.yaml" > "rules-$env.yaml"
+            promtool check rules "rules-$env.yaml"
+          done
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+          node_image: kindest/node:v1.32.0
+      - name: CRD validation against a real API server
+        run: |
+          kubectl apply -f docqa-operator/deploy/crd.yaml
+          kubectl wait --for=condition=Established crd/docqaservices.platform.example.com --timeout=60s
+          kubectl create namespace team-claims
+          kubectl apply --dry-run=server -f docqa-operator/examples/docqaservice.yaml
+      - name: CEL rejects the fake LLM in prod
+        run: |
+          ! cat <<'EOF' | kubectl apply --dry-run=server -f -
+          apiVersion: platform.example.com/v1alpha1
+          kind: DocQAService
+          metadata: {name: invalid, namespace: team-claims}
+          spec: {team: claims, environment: prod, llm: {provider: fake}}
+          EOF
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trivy config scan (Dockerfiles, chart, manifests)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
+
+  images:
+    needs: [python, kubernetes, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # keyless cosign signing
+    strategy:
+      matrix:
+        include:
+          - {name: docqa, dockerfile: Dockerfile, image_env: IMAGE}
+          - {name: docqa-operator, dockerfile: docqa-operator/Dockerfile, image_env: OPERATOR_IMAGE}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Resolve image reference
+        run: echo "REF=${{ env[matrix.image_env] }}:${{ github.sha }}" >> "$GITHUB_ENV"
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: ${{ env.REF }}
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.REF }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REF }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+      - if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@v3
+      - name: Push, sign and attest
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker push "$REF"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$REF")
+          cosign sign --yes "$DIGEST"
+          cosign attest --yes --type spdxjson --predicate "sbom-${{ matrix.name }}.spdx.json" "$DIGEST"
+
+  chart:
+    needs: [images]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Package and push chart
+        run: |
+          helm package charts/docqa --app-version "${{ github.sha }}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push docqa-*.tgz "oci://ghcr.io/${{ github.repository }}/charts"

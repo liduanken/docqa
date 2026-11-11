@@ -1,0 +1,8 @@
+apiVersion: v2
+name: docqa
+description: LLM-backed document Q&A service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+# 1.30 is needed for the lifecycle preStop.sleep action.
+kubeVersion: ">=1.30.0-0"

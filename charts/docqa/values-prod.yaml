@@ -1,0 +1,51 @@
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+
+resources:
+  requests: {cpu: 250m, memory: 256Mi}
+  limits: {memory: 512Mi}
+
+config:
+  DOCQA_LLM_PROVIDER: openai
+  DOCQA_LLM_MODEL: gpt-4o-mini
+  DOCQA_LLM_TIMEOUT_SECONDS: "8"
+  DOCQA_LLM_MAX_RETRIES: "1"
+  DOCQA_LLM_PRICE_PROMPT_PER_1K: "0.00015"
+  DOCQA_LLM_PRICE_COMPLETION_PER_1K: "0.0006"
+  # Shared store: any replica can answer about any document.
+  DOCQA_STORE_BACKEND: redis
+  # Customer documents stay out of the tracing backend in prod.
+  DOCQA_TRACE_CONTENT: "false"
+  DOCQA_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318
+
+secrets:
+  optional: false
+  externalSecret:
+    enabled: true
+    data:
+      - secretKey: DOCQA_LLM_API_KEY
+        remoteRef: {key: docqa/prod, property: llm_api_key}
+      - secretKey: DOCQA_REDIS_URL
+        remoteRef: {key: docqa/prod, property: redis_url}
+
+ingress:
+  enabled: true
+  annotations:
+    # Max document size with worst-case JSON escaping (6x) plus slack, matching the app's early 413 guard.
+    nginx.ingress.kubernetes.io/proxy-body-size: 590k
+
+podDisruptionBudget:
+  enabled: true
+
+topologySpread:
+  enabled: true
+
+metrics:
+  serviceMonitor:
+    enabled: true
+
+slo:
+  enabled: true
+  llm: {costPerHourWarningUsd: 20}

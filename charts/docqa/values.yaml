@@ -1,0 +1,89 @@
+# Safe defaults. Environments override these via values-<env>.yaml; templates never change per env.
+team: platform
+
+image:
+  repository: docqa
+  tag: ""  # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 1
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+resources:
+  requests: {cpu: 100m, memory: 192Mi}
+  limits: {memory: 384Mi}
+
+# Rendered into a ConfigMap. Every key MUST start with DOCQA_. No secrets here.
+config:
+  DOCQA_LLM_PROVIDER: fake
+  DOCQA_LLM_MODEL: fake-extractive-1
+  DOCQA_LLM_BASE_URL: https://api.openai.com/v1
+  DOCQA_LLM_TIMEOUT_SECONDS: "10"
+  DOCQA_LLM_MAX_RETRIES: "1"
+  DOCQA_LLM_MAX_CONCURRENCY: "16"
+  DOCQA_MAX_DOCUMENT_BYTES: "100000"
+  DOCQA_STORE_BACKEND: memory
+  DOCQA_LOG_LEVEL: INFO
+  DOCQA_TRACE_CONTENT: "true"
+  DOCQA_OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+secrets:
+  # Use a pre-created Secret instead of an ExternalSecret.
+  existingSecret: ""
+  # true lets pods start without the Secret (fake LLM needs no key).
+  optional: false
+  externalSecret:
+    enabled: false
+    refreshInterval: 1h
+    secretStoreRef: {kind: ClusterSecretStore, name: vault}
+    # - secretKey: DOCQA_LLM_API_KEY
+    #   remoteRef: {key: docqa/dev, property: llm_api_key}
+    data: []
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: nginx
+  host: docqa.local
+  annotations: {}
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  monitoringNamespaceSelector:
+    kubernetes.io/metadata.name: monitoring
+  # Extra egress. Redis (6379) and the OTLP endpoint port are opened automatically from config.
+  egress:
+    - ports: [{port: 443, protocol: TCP}]
+
+topologySpread:
+  enabled: false
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {release: kube-prometheus-stack}
+
+slo:
+  enabled: false
+  runbookBaseUrl: https://github.com/example/docqa/blob/main/docs/runbooks
+  availability: {target: 0.995}
+  # thresholdSeconds must equal a histogram bucket as rendered ("2.5", "5.0").
+  latency: {target: 0.95, thresholdSeconds: "2.5"}
+  llm: {costPerHourWarningUsd: 5}

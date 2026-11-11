@@ -1,0 +1,39 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "docqa.fullname" . }}
+  labels:
+    {{- include "docqa.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "docqa.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.monitoringNamespaceSelector | nindent 14 }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: http
+  egress:
+    - ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    {{- /* Derived from config so egress can't drift from what the app is told to call. */}}
+    {{- if eq (toString (.Values.config.DOCQA_STORE_BACKEND | default "")) "redis" }}
+    - ports: [{port: 6379, protocol: TCP}]
+    {{- end }}
+    {{- with .Values.config.DOCQA_OTEL_EXPORTER_OTLP_ENDPOINT }}
+    {{- $hostPort := splitList ":" (urlParse .).host }}
+    - ports: [{port: {{ ternary (last $hostPort) "4318" (gt (len $hostPort) 1) | int }}, protocol: TCP}]
+    {{- end }}
+    {{- with .Values.networkPolicy.egress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

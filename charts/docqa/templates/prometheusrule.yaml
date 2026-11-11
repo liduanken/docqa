@@ -1,0 +1,116 @@
+{{- if .Values.slo.enabled }}
+{{- $sel := include "docqa.promSelector" . }}
+{{- $name := include "docqa.fullname" . }}
+{{- $qroute := "/v1/documents/{document_id}/questions" }}
+{{- /* subf, not sub: sub is integer-only and would turn every budget into 0. */}}
+{{- $availBudget := round (subf 1.0 .Values.slo.availability.target) 6 }}
+{{- $latBudget := round (subf 1.0 .Values.slo.latency.target) 6 }}
+{{- $windows := list "5m" "30m" "1h" "6h" "3d" }}
+{{- $runbooks := .Values.slo.runbookBaseUrl }}
+{{- $team := .Values.team }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $name }}-slo
+  labels:
+    {{- include "docqa.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ $name }}.slo.recording
+      rules:
+        {{- range $w := $windows }}
+        # Availability SLI: share of non-5xx responses on real routes.
+        - record: docqa:slo_availability_error_ratio:rate{{ $w }}
+          expr: |
+            sum(rate(docqa_http_requests_total{ {{- $sel }},route!="unmatched",code=~"5.."}[{{ $w }}]))
+            /
+            sum(rate(docqa_http_requests_total{ {{- $sel }},route!="unmatched"}[{{ $w }}]))
+          labels:
+            service: {{ $name }}
+            # Same-named releases in different namespaces must not write the same series.
+            namespace: {{ $.Release.Namespace }}
+        # Latency SLI: share of question requests slower than the threshold.
+        # (count - good) / count is NaN with no traffic, so it never fires on an idle service;
+        # 1 - good/clamp_min(count, ...) would evaluate to 1 and page falsely.
+        - record: docqa:slo_latency_error_ratio:rate{{ $w }}
+          expr: |
+            (
+              sum(rate(docqa_http_request_duration_seconds_count{ {{- $sel }},route="{{ $qroute }}"}[{{ $w }}]))
+              -
+              sum(rate(docqa_http_request_duration_seconds_bucket{ {{- $sel }},route="{{ $qroute }}",le="{{ $.Values.slo.latency.thresholdSeconds }}"}[{{ $w }}]))
+            )
+            /
+            sum(rate(docqa_http_request_duration_seconds_count{ {{- $sel }},route="{{ $qroute }}"}[{{ $w }}]))
+          labels:
+            service: {{ $name }}
+            namespace: {{ $.Release.Namespace }}
+        {{- end }}
+    - name: {{ $name }}.slo.alerts
+      rules:
+        {{- range $slo := list "availability" "latency" }}
+        {{- $budget := ternary $availBudget $latBudget (eq $slo "availability") }}
+        {{- $target := ternary $.Values.slo.availability.target $.Values.slo.latency.target (eq $slo "availability") }}
+        {{- $title := title $slo }}
+        {{- $metric := printf "docqa:slo_%s_error_ratio" $slo }}
+        {{- $svc := printf "{service=\"%s\",namespace=\"%s\"}" $name $.Release.Namespace }}
+        {{- /* Multi-window, multi-burn-rate alerts (Google SRE workbook). */}}
+        {{- range $a := list (list "Fast" "1h" "5m" 14.4 "2m" "page") (list "Medium" "6h" "30m" 6.0 "15m" "page") (list "Slow" "3d" "6h" 1.0 "1h" "ticket") }}
+        {{- $factor := index $a 3 }}
+        - alert: DocQA{{ $title }}BudgetBurn{{ index $a 0 }}
+          expr: |
+            {{ $metric }}:rate{{ index $a 1 }}{{ $svc }} > ({{ $factor }} * {{ $budget }})
+            and
+            {{ $metric }}:rate{{ index $a 2 }}{{ $svc }} > ({{ $factor }} * {{ $budget }})
+          for: {{ index $a 4 }}
+          labels:
+            severity: {{ index $a 5 }}
+            team: {{ $team }}
+            slo: {{ $slo }}
+          annotations:
+            summary: "{{ $name }} is burning its {{ $slo }} error budget ({{ index $a 0 | lower }} burn)"
+            description: "The {{ $slo }} SLO ({{ $target }}) error ratio is above {{ $factor }}x budget over {{ index $a 1 }} and {{ index $a 2 }}."
+            runbook_url: {{ $runbooks }}/slo-{{ $slo }}.md
+        {{- end }}
+        {{- end }}
+    - name: {{ $name }}.llm
+      rules:
+        - alert: DocQALLMCircuitOpen
+          expr: max(docqa_llm_circuit_open{ {{- $sel }}}) > 0
+          for: 2m
+          labels: {severity: warning, team: {{ $team }}}
+          annotations:
+            summary: "{{ $name }} has opened its LLM circuit breaker"
+            description: "The LLM provider is failing repeatedly; questions are being rejected with 503."
+            runbook_url: {{ $runbooks }}/llm-provider-degraded.md
+        - alert: DocQALLMErrorRateHigh
+          expr: |
+            sum by (outcome) (rate(docqa_llm_requests_total{ {{- $sel }},outcome!="success"}[10m]))
+            /
+            scalar(clamp_min(sum(rate(docqa_llm_requests_total{ {{- $sel }}}[10m])), 1e-9))
+            > 0.1
+          for: 10m
+          labels: {severity: warning, team: {{ $team }}}
+          annotations:
+            summary: "{{ $name }} LLM calls are failing (more than 10%)"
+            description: "LLM calls are failing; the outcome label shows timeout, rate_limited, unavailable, error, circuit_open or overloaded."
+            runbook_url: {{ $runbooks }}/llm-provider-degraded.md
+        - alert: DocQALLMCostHigh
+          expr: sum(increase(docqa_llm_cost_usd_total{ {{- $sel }}}[1h])) > {{ .Values.slo.llm.costPerHourWarningUsd }}
+          for: 15m
+          labels: {severity: warning, team: {{ $team }}}
+          annotations:
+            summary: "{{ $name }} LLM spend is above {{ .Values.slo.llm.costPerHourWarningUsd }} USD per hour"
+            description: "Estimated LLM spend over the last hour exceeds the configured warning threshold."
+            runbook_url: {{ $runbooks }}/llm-cost-high.md
+        - alert: DocQAMetricsMissing
+          expr: absent(up{ {{- $sel }}} == 1)
+          for: 10m
+          labels: {severity: page, team: {{ $team }}}
+          annotations:
+            summary: "{{ $name }} has no healthy scrape target"
+            description: "Prometheus cannot scrape any DocQA pod, so every other alert for this service is blind."
+            runbook_url: {{ $runbooks }}/metrics-missing.md
+{{- end }}

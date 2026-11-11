@@ -1,0 +1,22 @@
+replicaCount: 1
+
+config:
+  DOCQA_LLM_PROVIDER: fake
+  DOCQA_LOG_LEVEL: DEBUG
+  DOCQA_FAKE_LLM_LATENCY_SECONDS: "0.2"
+  DOCQA_TRACE_CONTENT: "true"
+
+secrets:
+  optional: true
+  externalSecret:
+    enabled: true
+    data:
+      - secretKey: DOCQA_LLM_API_KEY
+        remoteRef: {key: docqa/dev, property: llm_api_key}
+
+metrics:
+  serviceMonitor:
+    enabled: true
+
+slo:
+  enabled: true

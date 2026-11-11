@@ -1,0 +1,5 @@
+*
+!docqa-operator/pyproject.toml
+!docqa-operator/docqa_operator/
+!charts/docqa/
+**/__pycache__

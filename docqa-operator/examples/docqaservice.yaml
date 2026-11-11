@@ -1,0 +1,33 @@
+# A team asks for a DocQA instance; the operator turns this into a Helm release.
+apiVersion: platform.example.com/v1alpha1
+kind: DocQAService
+metadata:
+  name: claims-docqa
+  namespace: team-claims
+spec:
+  team: claims
+  environment: dev
+  size: small
+  replicas: {min: 1, max: 1}  # max > 1 switches the document store to Redis
+  llm:
+    provider: openai
+    model: gpt-4o-mini
+    timeoutSeconds: 8
+    credentials:
+      remoteKey: teams/claims/docqa  # path in the secret store, never the key itself
+  documents:
+    maxBytes: 200000
+  slo:
+    latencyThresholdSeconds: "5.0"
+    llmCostPerHourWarningUsd: 10
+---
+# The smallest valid request: keyless fake LLM for experiments.
+apiVersion: platform.example.com/v1alpha1
+kind: DocQAService
+metadata:
+  name: sandbox
+  namespace: team-claims
+spec:
+  team: claims
+  llm:
+    provider: fake
