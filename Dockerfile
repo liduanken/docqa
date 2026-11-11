@@ -11,11 +11,17 @@ COPY pyproject.toml ./
 COPY app ./app
 # Optional corporate CA (TLS-intercepting proxies); a secret mount keeps it out of the image layers.
 RUN --mount=type=secret,id=ca_bundle,required=false \
-    if [ -s /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi && pip install .
+    if [ -s /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi && pip install . \
+    # Build tooling has no place at runtime (and setuptools vendors packages with known CVEs).
+    && pip uninstall -y setuptools pip
 
 FROM ${PYTHON_IMAGE} AS runtime
 ENV PATH=/opt/venv/bin:$PATH PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-RUN groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --no-create-home app
+# Pick up Debian security fixes released after the base image was built, and drop the base
+# image's own build tooling.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \
+    && python -m pip uninstall -y setuptools wheel pip \
+    && groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --no-create-home app
 COPY --from=build /opt/venv /opt/venv
 USER 10001:10001
 EXPOSE 8080

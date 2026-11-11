@@ -11,7 +11,7 @@ permissions:
 env:
   IMAGE: ghcr.io/${{ github.repository }}/docqa
   OPERATOR_IMAGE: ghcr.io/${{ github.repository }}/docqa-operator
-  HELM_VERSION: v3.16.2
+  HELM_VERSION: v3.22.1
   KUBECONFORM_VERSION: v0.6.7
 
 jobs:
@@ -151,6 +151,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+          trivyignores: .trivyignore.yaml
       - name: SBOM
         uses: anchore/sbom-action@v0
         with:

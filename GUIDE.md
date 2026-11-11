@@ -14,7 +14,7 @@
 | Python | 3.11, via [uv](https://docs.astral.sh/uv/) |
 | Docker | Any recent version, with at least 4 CPUs and 8 GB of memory available |
 | kind | Kubernetes 1.32 node image (the chart needs 1.30 or later) |
-| Helm | 3.16 |
+| Helm | 3.22 |
 | kubectl | Matching the cluster |
 
 ## 3. Quick check without Kubernetes

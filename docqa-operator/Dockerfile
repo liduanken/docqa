@@ -3,7 +3,7 @@
 ARG PYTHON_IMAGE=python:3.11-slim
 
 FROM ${PYTHON_IMAGE} AS helm
-ARG HELM_VERSION=v3.16.2
+ARG HELM_VERSION=v3.22.1
 # Set by BuildKit to the target architecture (amd64, arm64), so Apple Silicon kind clusters work too.
 ARG TARGETARCH
 ADD https://get.helm.sh/helm-${HELM_VERSION}-linux-${TARGETARCH}.tar.gz /tmp/helm.tgz
@@ -17,12 +17,16 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_INDEX_URL=${PIP_INDEX
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     HELM_CACHE_HOME=/tmp/helm/cache HELM_CONFIG_HOME=/tmp/helm/config HELM_DATA_HOME=/tmp/helm/data \
     HELM_BIN=/usr/local/bin/helm DOCQA_CHART_PATH=/chart
+# Pick up Debian security fixes released after the base image was built.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 COPY --from=helm /usr/local/bin/helm /usr/local/bin/helm
 WORKDIR /src
 COPY docqa-operator/pyproject.toml ./
 COPY docqa-operator/docqa_operator ./docqa_operator
 RUN --mount=type=secret,id=ca_bundle,required=false \
-    if [ -s /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi && pip install .
+    if [ -s /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi && pip install . \
+    # Build tooling has no place at runtime (and setuptools vendors packages with known CVEs).
+    && pip uninstall -y setuptools wheel pip
 COPY charts/docqa /chart
 # Not "operator": that user already exists in Debian (useradd exit code 9).
 RUN useradd --system --uid 10001 docqa-operator

@@ -10,3 +10,15 @@ misconfigurations:
     paths: ["docqa-operator/deploy/operator.yaml"]
     statement: >-
       The operator installs the chart, which owns a Service, NetworkPolicy and Ingress per instance.
+
+# Time-boxed: no Helm release (v3.22.1 or v4.3.1, checked 2026-11-11) is built with the fixes yet.
+# After expired_at the scan fails again; bump HELM_VERSION in docqa-operator/Dockerfile once Helm ships them.
+vulnerabilities:
+  - id: CVE-2026-78661
+    paths: ["usr/local/bin/helm"]
+    expired_at: 2026-12-11
+    statement: golang.org/x/net in the upstream Helm binary; no fixed Helm release yet.
+  - id: CVE-2026-111943
+    paths: ["usr/local/bin/helm"]
+    expired_at: 2026-12-11
+    statement: Go stdlib in the upstream Helm binary; no fixed Helm release yet.
